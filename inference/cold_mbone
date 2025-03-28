@@ -1,0 +1,64 @@
+import time
+import torch
+from PIL import Image
+from torchvision import transforms
+import torch.profiler as profiler
+from mobileone.mobileone_triplet import MobileOneWithTriplet
+from mobileone import reparameterize_model
+
+def cold_start_inference(image_path, model_path, device_name="cuda", use_reparameterization=False, model_name=None, img_size=None):
+    device = torch.device(device_name)
+    prof = profiler.profile(
+        activities=[
+            profiler.ProfilerActivity.CPU,
+            profiler.ProfilerActivity.CUDA if device_name == "cuda" else None,
+        ],
+        record_shapes=True,
+        profile_memory=True,
+        with_stack=True,
+        with_modules=True
+    )
+    prof.start()
+
+    transform = transforms.Compose([
+        transforms.Resize(128),
+        transforms.CenterCrop(128),
+        transforms.ToTensor(),
+        transforms.Normalize([0.485, 0.456, 0.406],
+                             [0.229, 0.224, 0.225])
+    ])
+    image = Image.open(image_path).convert('RGB')
+    image = transform(image).unsqueeze(0).to(device)
+
+    model = MobileOneWithTriplet(num_classes=105).to(device)
+    model.load_state_dict(torch.load(model_path, weights_only=True, map_location=device))
+    if use_reparameterization:
+        model = reparameterize_model(model)
+        model = model.to(device)
+    model.eval()
+    with torch.no_grad():
+        _, logits = model(image)
+        _, preds = torch.max(logits, 1)
+    prof.stop()
+
+    filename = f"profiling_runs/cold_{model_name}_{img_size}_{device_name}_{'reparam' if use_reparameterization else 'standard'}.txt"
+    with open(filename, 'w') as f:
+        f.write("Detailed Layer Profiling Results:\n\n")
+        f.write(prof.key_averages().table(
+            sort_by="cuda_time_total" if device_name == "cuda" else "cpu_time_total",
+            row_limit=500
+        ))
+    return filename, preds.cpu().item()
+
+if __name__ == "__main__":
+    # Пример вызова (укажите корректные пути к изображению и модели)
+    profile_file, prediction = cold_start_inference(
+        image_path="path/to/your/image.jpg",
+        model_path="path/to/your/transfered.pt",
+        device_name="cuda",
+        use_reparameterization=False,
+        model_name='Mb1_s4',
+        img_size='128'
+    )
+    print(f"Profiling results saved to: {profile_file}")
+    print(f"Prediction: {prediction}")
